@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "Motor.h"
+#include "test_runner.h"          /* 测试调度器 — 通过 test_config.h 控制 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,6 +93,10 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   Motor_Init();
+
+  /* 执行硬件自检 — 通过 Test/test_config.h 控制开关 */
+  /* 正式发布时将 TEST_MOTOR_ENABLE 置 0 即可, 无需删除任何代码 */
+  Test_Runner();
   /* USER CODE END 2 */
 
   /* Infinite loop */

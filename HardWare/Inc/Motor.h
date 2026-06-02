@@ -211,6 +211,16 @@ Motor_State_t Motor_GetState(uint8_t motor_id);
 /** @brief 获取最后的错误码 */
 Motor_Error_t Motor_GetLastError(uint8_t motor_id);
 
+/* ---- 测试函数 (由 test_config.h 宏控制是否编译, 不影响正式代码) ---- */
+
+/**
+ * @brief 电机自测函数 — 依次测试使能/速度/位置/急停
+ * @note  由 test_runner.c 在 Test_Runner() 中调用
+ *        受 test_config.h 中 TEST_MOTOR_ENABLE 宏控制
+ *        关闭测试开关后, 此函数不参与编译, 不占 Flash
+ */
+void Motor_Test(void);
+
 #ifdef __cplusplus
 }
 #endif

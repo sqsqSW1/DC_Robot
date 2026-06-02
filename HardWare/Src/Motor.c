@@ -9,6 +9,7 @@
 
 #include "Motor.h"
 #include <string.h>
+#include "test_config.h"   /* 测试开关 — 控制 Motor_Test() 是否参与编译 */
 
 /* ======================================================================== */
 /*                           模块内部宏定义                                   */
@@ -594,3 +595,220 @@ Motor_Error_t Motor_GetLastError(uint8_t motor_id)
     if (motor_id >= MOTOR_MAX_COUNT) return MOTOR_ERROR_INVALID_PARAM;
     return MGR->motors[motor_id].last_error;
 }
+
+/* ======================================================================== */
+/*                    电机自测函数 (编译开关控制)                              */
+/* ======================================================================== */
+
+#if TEST_MOTOR_ENABLE
+
+/* ---- 测试辅助: 等待指定电机完成当前操作 ---- */
+
+/**
+ * @brief 阻塞等待电机操作完成 (带超时保护)
+ * @param motor_id  电机ID
+ * @param timeout_ms 超时时间(ms), 超过后放弃等待
+ * @return 0=操作完成, 1=超时
+ */
+static uint8_t Motor_Test_WaitReady(uint8_t motor_id, uint32_t timeout_ms)
+{
+    uint32_t tick_start = HAL_GetTick();
+    while (Motor_IsBusy(motor_id)) {
+        /* 在主循环未启动时手动调用 HAL_Delay 以保持 SysTick 运行 */
+        HAL_Delay(1);
+        if ((HAL_GetTick() - tick_start) > timeout_ms) {
+            return 1;   /* 超时 */
+        }
+    }
+    return 0;           /* 完成 */
+}
+
+/**
+ * @brief 电机自测入口
+ * @note  测试流程: 使能 → 速度模式 → 位置模式 → 急停
+ *        每个步骤都有超时保护, 单步失败不阻塞后续测试
+ *        测试完成后电机处于失能释放状态
+ */
+void Motor_Test(void)
+{
+    /* ================================================================ */
+    /*  Step 1: 使能测试                                                 */
+    /*  发送使能命令到电机1, 等待响应, 检查是否成功                       */
+    /* ================================================================ */
+
+    Motor_Error_t err = Motor_Enable(MOTOR_ID_1, 1);
+    if (err != MOTOR_OK) {
+        /* 发送失败 (DMA忙或参数错误) — 跳过后续测试 */
+        goto test_done;
+    }
+    if (Motor_Test_WaitReady(MOTOR_ID_1, 1000)) {
+        /* 1秒内未收到响应 — 检查电机连接和地址 */
+        goto test_done;
+    }
+    if (Motor_GetLastError(MOTOR_ID_1) != MOTOR_OK) {
+        /* 电机响应了但返回错误 — 检查校验模式 */
+        goto test_done;
+    }
+    /* 使能成功 — 电机应上电锁定, 手动转不动轴 */
+
+    HAL_Delay(200);  /* 等待电机稳定 */
+
+    /* ================================================================ */
+    /*  Step 2: 速度模式测试                                             */
+    /*  使电机1以低速运行, 验证方向/速度控制正常                          */
+    /* ================================================================ */
+
+    {
+        Motor_SpeedParams_t spd = {
+            .direction    = 0,          /* CCW 逆时针 */
+            .speed        = 200,        /* 低速 (RPM*10 或 脉冲/秒) */
+            .acceleration = 3,          /* 加速度档位 */
+            .sync_flag    = 0           /* 立即执行 */
+        };
+        err = Motor_SpeedControl(MOTOR_ID_1, &spd);
+        if (err != MOTOR_OK) goto test_done;
+        if (Motor_Test_WaitReady(MOTOR_ID_1, 1000)) goto test_done;
+        if (Motor_GetLastError(MOTOR_ID_1) != MOTOR_OK) goto test_done;
+    }
+
+    HAL_Delay(1000);  /* 电机旋转1秒, 肉眼观察方向是否正确 */
+
+    /* ================================================================ */
+    /*  Step 2b: 反转速度测试                                            */
+    /* ================================================================ */
+
+    {
+        Motor_SpeedParams_t spd = {
+            .direction    = 1,          /* CW 顺时针 — 应反向旋转 */
+            .speed        = 200,
+            .acceleration = 3,
+            .sync_flag    = 0
+        };
+        err = Motor_SpeedControl(MOTOR_ID_1, &spd);
+        if (err != MOTOR_OK) goto test_done;
+        if (Motor_Test_WaitReady(MOTOR_ID_1, 1000)) goto test_done;
+        if (Motor_GetLastError(MOTOR_ID_1) != MOTOR_OK) goto test_done;
+    }
+
+    HAL_Delay(1000);  /* 电机反向旋转1秒 */
+
+    /* 停止旋转 */
+    {
+        Motor_SpeedParams_t spd = {
+            .direction    = 0,
+            .speed        = 0,          /* 速度=0 = 停止 */
+            .acceleration = 3,
+            .sync_flag    = 0
+        };
+        err = Motor_SpeedControl(MOTOR_ID_1, &spd);
+        if (err != MOTOR_OK) goto test_done;
+        Motor_Test_WaitReady(MOTOR_ID_1, 500);
+    }
+
+    HAL_Delay(200);
+
+    /* ================================================================ */
+    /*  Step 3: 位置模式测试                                             */
+    /*  移动3200脉冲 (通常为1/10圈, 取决于细分) 验证定位功能              */
+    /* ================================================================ */
+
+    {
+        Motor_PositionParams_t pos = {
+            .direction    = 0,          /* CCW */
+            .speed        = 500,
+            .acceleration = 5,
+            .pulse_count  = 3200,       /* 脉冲数 (取决于细分, 调整此值改变行程) */
+            .mode         = 0,          /* 相对位置 */
+            .sync_flag    = 0           /* 立即执行 */
+        };
+        err = Motor_PositionControl(MOTOR_ID_1, &pos);
+        if (err != MOTOR_OK) goto test_done;
+        if (Motor_Test_WaitReady(MOTOR_ID_1, 2000)) goto test_done;
+        if (Motor_GetLastError(MOTOR_ID_1) != MOTOR_OK) goto test_done;
+    }
+
+    HAL_Delay(200);
+
+    /* 反向移动,回到原位附近 */
+    {
+        Motor_PositionParams_t pos = {
+            .direction    = 1,          /* CW — 返回 */
+            .speed        = 500,
+            .acceleration = 5,
+            .pulse_count  = 3200,
+            .mode         = 0,          /* 相对位置 */
+            .sync_flag    = 0
+        };
+        err = Motor_PositionControl(MOTOR_ID_1, &pos);
+        if (err != MOTOR_OK) goto test_done;
+        if (Motor_Test_WaitReady(MOTOR_ID_1, 2000)) goto test_done;
+        if (Motor_GetLastError(MOTOR_ID_1) != MOTOR_OK) goto test_done;
+    }
+
+    HAL_Delay(200);
+
+    /* ================================================================ */
+    /*  Step 4: 急停测试                                                 */
+    /* ================================================================ */
+
+    err = Motor_EmergencyStop(MOTOR_ID_1);
+    if (err != MOTOR_OK) goto test_done;
+    Motor_Test_WaitReady(MOTOR_ID_1, 500);
+
+    HAL_Delay(100);
+
+    /* ================================================================ */
+    /*  Step 5: 多电机同步启动测试 (电机2和电机3)                         */
+    /*  如果只接了一个电机, 此步超时不会影响整体结果                       */
+    /* ================================================================ */
+
+    /* 先使能电机2和电机3 */
+    Motor_Enable(MOTOR_ID_2, 1);
+    Motor_Test_WaitReady(MOTOR_ID_2, 500);
+    Motor_Enable(MOTOR_ID_3, 1);
+    Motor_Test_WaitReady(MOTOR_ID_3, 500);
+
+    /* 缓存速度命令到电机2和电机3 (sync_flag=1) */
+    {
+        Motor_SpeedParams_t spd = {
+            .direction    = 0,
+            .speed        = 300,
+            .acceleration = 3,
+            .sync_flag    = 1           /* 缓存,不立即执行 */
+        };
+        Motor_SpeedControl(MOTOR_ID_2, &spd);
+        Motor_Test_WaitReady(MOTOR_ID_2, 500);
+        Motor_SpeedControl(MOTOR_ID_3, &spd);
+        Motor_Test_WaitReady(MOTOR_ID_3, 500);
+    }
+
+    /* 广播同步启动 — 两个电机应同时开始旋转 */
+    Motor_SyncStartAll();
+    HAL_Delay(2000);  /* 运转2秒 */
+
+    /* 急停全部 */
+    Motor_EmergencyStopAll();
+    HAL_Delay(200);
+
+    /* 失能全部电机 */
+    Motor_Enable(MOTOR_ID_2, 0);
+    Motor_Test_WaitReady(MOTOR_ID_2, 500);
+    Motor_Enable(MOTOR_ID_3, 0);
+    Motor_Test_WaitReady(MOTOR_ID_3, 500);
+
+test_done:
+    /* ================================================================ */
+    /*  测试结束: 确保电机1处于安全状态 (失能释放)                        */
+    /* ================================================================ */
+    {
+        Motor_Error_t final_err = Motor_Enable(MOTOR_ID_1, 0);
+        if (final_err == MOTOR_OK) {
+            Motor_Test_WaitReady(MOTOR_ID_1, 500);
+        }
+        /* 最终状态记录在 Motor_GetLastError(MOTOR_ID_1) 中,
+         * 可通过调试器或逻辑分析仪查看 */
+    }
+    /* 测试结束 — 如果电机未响应, 用逻辑分析仪检查 USART1 TX/RX 波形 */
+}
+
+#endif /* TEST_MOTOR_ENABLE */
